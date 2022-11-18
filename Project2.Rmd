@@ -1,0 +1,564 @@
+---
+title: "Project 2"
+author: "Jasmine Xu"
+date: "2022-11-05"
+output: 
+  html_document: 
+    toc: true
+    toc_float: true
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+options(digits = 3)
+
+library(ggplot2)
+library(tidyverse)
+library(stringr)
+library(RSelenium)
+library(rvest)
+library(netstat)
+library(data.table)
+library(fuzzyjoin)
+library(countrycode)
+library(RColorBrewer)
+library(ggrepel)
+
+prem = read_csv("prem_player_stats.csv", skip = 2)
+wages = read_csv("pl_player_wages.csv")
+```
+
+
+## **Introduction**
+
+This project will aim to analyse player data from the English Premier League (PL), the highest-level and most-watched league in the English football (soccer) system, by examining relationships between various personal and performance-based player variables from the current 22/23 season. As arguably the most popular sports league in the world, the PL has garnered immense viewership both domestically and internationally, with millions of viewers pledging their loyalty, time, and sanity to a PL club.
+
+```{r echo = FALSE, fig.cap= "The excitement and unpredictability of the Premier League attracts vast amounts of viewers"}
+knitr::include_graphics("Kane+Sonny!.jpg")
+```
+
+Most data in this investigation has been obtained from 2 separate datasets from  [fbref.com](https://https://fbref.com/en/). The [first dataset](https://fbref.com/en/comps/9/stats/Premier-League-Stats) contains general information for 463 PL players, such as their nationality, club, and postion, as well as game and performance statistics, such as minutes played, goals, and assists. It also includes advanced data (expected goals and expected assists) taken from Opta, a sports analytics company. The [second dataset](https://fbref.com/en/comps/9/wages/Premier-League-Wages) contains player weekly and annual wages. These datasets will be merged so that performance can be examined as a potential predictor of wages. These datasets were selected for their comprehensiveness, and for the fact that data was organised by player instead of by club or by games. 
+
+I also decided to obtain the most recent Fantasy Premier League (FPL) prices for each player from the [official FPL website](https://fantasy.premierleague.com/player-list). FPL allows viewers to build their own 15-person team with £100 in the bank at the start of the season. Player prices fluctuate based on performance, and FPL players are generally allowed to exchange one player for another in the market each gameweek. I chose to make use of FPL player prices and FPL points earned as additional indicators of player value, and I aim to look at the extent to which player performance predicts FPL pricing.
+
+All data for this investigation is from the 22/23 season following 14 gameweeks.
+
+
+## **Data Preparation**
+
+The first two datasets were obtained directly from [fbref.com](https://https://fbref.com/en/). The website provides an option to export its data in CSV form (via the steps: Share & Export > Get table as CSV). 
+
+I also scraped FPL data from [fantasy.premierleague.com](https://fantasy.premierleague.com/player-list). Because this website was loaded using JavaScript, I had to use several packages (RSelenium, netstat, and data.table) in addition to rvest to put the data into a dataframe. Because FPL data changes weekly, I stored this dataframe locally as a CSV (can be found in the GitHub repository). I scraped the Player, Club, FPL Price, and FPL Points variables into a tibble, with the aim of merging this with my main player performance dataframe. However, because the player names were from different sources, they were slightly different (first source includd first and last namke, while FPL website had only first name and occasionally first initial), and so the dataframes had to be merged using a method that employed "fuzzy" matching. The method "regex_left_join" in the "fuzzyjoin" package was able to accomplish this, though 28 players from the original dataset could not be matched mostly due to foreign accents in their names (i.e. in the fully merged dataframe, these players have NA values for the FPLPrice and FPLPoints variables). 
+
+```{r echo = FALSE}
+## Fixing text in prem dataset: ##
+
+# Nation was formatted as "eng ENG" bc included flag; 
+# here we are removing everything before the space to
+# only keep the 3-letter abbreviation for each nation
+prem$Nation = sub(".* ", "", prem$Nation)
+
+prem$Age = sub("-.*", "", prem$Age)
+
+# Reformatting Pos variable:
+## No clue how this works but it does so that's fine 
+## but basically some of the positions are formatted 
+## like "FWMF" so I just split them so that they're 
+## "FW MF"
+### Note that the "\\1 " is a backreference to the 
+### previous match
+prem$Pos = str_trim(gsub("(.{2})", "\\1 ", prem$Pos))
+prem$Pos = sub(" .*", "", prem$Pos)
+```
+
+Several variables had to be altered within the first dataset. The "Nation" and "Age" variables were changed so that they only included the three-letter abbreviation for each country (previously included flag codes) and the age in years (previously included days). The Position variable was also tweaked such that if multiple positions were included, only the first would be kept.
+
+```{r echo = FALSE}
+## Reshaping datasets ##
+
+# Removing last three rows from both datasets...
+# RUN ONLY ONCE!
+prem = slice(prem, 1:(n() - 3)) 
+wages = slice(wages, 1:(n() - 3))
+
+# Converting Age from character to double
+prem$Age = as.numeric(prem$Age)
+
+# Selecting the variables that will be used in this 
+# investigation and removing the extraneous ones, and 
+# renaming variable names:
+prem = prem %>%
+  select(Player, Nation, Pos, Squad, Age, MP, Starts, Min, Gls...12, Ast...13, xG...24, xAG...26) %>%
+  rename("Position" = "Pos",
+         "Club" = "Squad",
+         "MatchesPlayed" = "MP", 
+         "TotalMinutes" = "Min", 
+         "Goals" = "Gls...12", 
+         "Assists" = "Ast...13", 
+         "xG" = "xG...24", 
+         "xAG" = "xAG...26")
+```
+
+The main dataset containing player statistics was extremely thorough and provided a lot of information that I decided not to use, so they were removed. Variable names were changed to be more convenient and descriptive. 
+
+```{r echo = FALSE}
+## Fixing Wage data ##
+
+# Extracting only the wage in pounds for both variables
+wages$`Weekly Wages` = parse_number(wages$`Weekly Wages`)
+wages$`Annual Wages` = parse_number(wages$`Annual Wages`)
+
+# Renaming and selecting variables for convenience
+wages = wages %>%
+  rename("WeeklyWages" = `Weekly Wages`, 
+       "AnnualWages" = `Annual Wages`, 
+       "Club" = "Squad") %>%
+  select(Player, Club, WeeklyWages, AnnualWages)
+```
+
+Prior to being merged, the wages dataset was altered so that the weekly and annual wages were parsed as numbers. They previously contained the wages in pounds, dollars, and Euros, and they now only contain the value in pounds. Both variables were also renamed, because the original names contained spaces and required backticks.
+
+```{r echo = FALSE, results = "hide"}
+# Code to scrape data from webpage is contained in
+# separate file; dataframe stored locally in csv 
+# and imported into this report:
+fpl = read_csv("fpl_table_GW14.csv")
+
+# Changing a few club names so that they can be 
+# appropriately matched (an abbreviated club name
+# cannot really be matched to its full club name)
+wages$Club[wages$Club == "Nott'ham Forest"] = "Nottingham Forest"
+prem$Club[prem$Club == "Nott'ham Forest"] = "Nottingham Forest"
+
+# "Fuzzy" left joining via regular expressions:
+  #Converting name to title so that something like
+  #"De Gea" matches with "de Gea"
+prem$Player = str_to_title(prem$Player)
+
+# Merging
+footy = prem %>% 
+  regex_left_join(fpl, by = c("Player", "Club" = "Team"), ignore_case = F) %>%
+  rename("Player" = "Player.x", "FPLPrice" = "Cost", "FPLPoints" = "Points")
+
+# These are the players contained in the original
+# dataframe (footy) that did not get a match from
+# the scraped dataframe (fpl). I've done what I can
+# to minimise this but it's too time-consuming so 
+# I gave up 
+  # Something I tried: can make new variable
+  # w only the last name of footy$Player, and match
+  # to fpl$Player using stringdist_left_join. Couldn't
+  # quite figure out
+footy$Player[is.na(footy$Player.y)]
+
+  # e.g. here we can see that all 6 duplicate names
+  # are missing one of their matches, bc FPL only
+  # looks at their current club status
+prem$Player[duplicated(prem$Player)] %in% 
+  footy$Player[is.na(footy$Player.y)]
+
+# Deselecting unneeded variables
+footy = select(footy, -c(Player.y, Team))
+
+# Converting FPLPrice to a double
+footy$FPLPrice = parse_number(footy$FPLPrice)
+```
+
+```{r echo = FALSE, results = "hide"}
+## Merging ##
+
+# The join...
+footy = left_join(footy, wages, by = c("Player", "Club"))
+
+# Checking for NAs
+## Turns out that there are 86 players who are missing
+## both weekly and annual wage data, and so they will
+## obviously not be included in any investigation of
+## wages and another variable, but *maybe* we can use
+## whatever model/graph we produce to predict/
+## approximate their wages based on their stats.
+sum(is.na(footy$AnnualWages))
+```
+The player statistics and wage datasets were merged by matching player names and clubs. It was important to match both variables because some players (6 of them) actually appeared twice in both datasets due to having transferred to another PL club mid-season. 
+
+## **Variable Descriptions**
+
+
+```{r echo = FALSE}
+# Subset of final data: 
+head(footy)
+```
+
+
+<table>
+
+Variable Name    Type         Variable Description
+-------------    ---------    -----------------------------------------
+Player           chr          Name of player
+Nation           chr          Nationality of player
+Club             chr          PL club player belongs to (there are a total of 20 PL clubs)
+Age              dbl          Age of player in years
+MatchesPlayed    dbl          Number of matches played in current season (maximum 13)
+Starts           dbl          Number of matches started (i.e. not substituted on)
+TotalMinutes     dbl          Total minutes played (each full match is 90 minutes)
+Goals            dbl          Number of goals scored by player
+Assists          dbl          Number of assists provided by player
+xG               dbl          Expected goals scored by the player, based on several factors of the shot taken. It does not take into account the "quality" of the player, and is instead an estimate of how well an average player would havae done in the given situation.
+xAG              dbl          Expected assists to goals provided by the player, calculated similarly to xG. xAG is an indication of a player's ability to set up a goal-scoring opportunity.
+FPLPoints        dbl          The total number of points a player has earned in Fantasy Premier League; players earn points by scoring goals, assisting, preventing opposition goals, etc. 
+FPLPrice         dbl          The player's price in Fantasy Premier League; player prices go up or down based on their current performance.
+WeeklyWages      dbl          The player's weekly salary in pounds
+AnnualWages      dbl          The player's annual salary in pounds
+
+</table>
+
+
+## **Univariate Analyses**
+
+
+### **1. The Distribution of Player Age**
+
+```{r echo = FALSE}
+ggplot(footy) + 
+  geom_histogram(aes(x = Age), bins = 25) + 
+  labs(title = "Distribution of Player Ages",
+       x = "Age in Years", 
+       y = "Count") + 
+  geom_vline(aes(xintercept = mean(Age, na.rm = T)), color = "red", linetype = "dashed") + 
+  geom_vline(aes(xintercept = median(Age, na.rm = T)), color = "blue", linetype = "dashed")
+```
+
+```{r echo = FALSE}
+# Function to facilitate stats for histograms
+stats = function(variableName, variable) {
+  cat("Minimum ", variableName, ": ", min(variable, na.rm = T), "\n", 
+    "Maximum ", variableName, ": ", max(variable, na.rm = T), "\n", 
+    "Mean ", variableName, ": ", mean(variable, na.rm = T), "\n",
+    "Median ", variableName, ": ", median(variable, na.rm = T), "\n",
+    "Standard deviation: ", sd(footy$Age), sep = "")
+}
+```
+
+```{r echo = FALSE}
+stats("Age", footy$Age)
+```
+
+The histogram shows that a vast majority of players in the Premier League are between 20 and 30 years old, with the largest proportion of players being 25 years old. The distribution is fairly symmetrical, and is somewhat representative of a normal distribution. This is reinforced by the mean and median values, both of which are 26. 
+
+
+### **2. Distribution of Player Nationality**
+
+```{r echo = FALSE, results='hide'}
+# Using countrycode package to sort country abbreviations
+# into continent
+guess_field(footy$Nation) # The dataset uses mostly ioc abbreviations
+footy$Continent = countrycode(sourcevar = footy$Nation, origin = "ioc", destination = "continent", warn = F)
+unique(footy$Nation)
+
+# Some countries weren't accounted for by the package so I
+# went in and changed them manually
+footy$Continent[footy$Nation == "ENG" | footy$Nation == "SCO" | footy$Nation == "WAL" | footy$Nation == "NIR"] = "Europe"
+footy$Continent[footy$Nation == "IRN"] = "Asia"
+footy$Continent[footy$Nation == "NGA"] = "Africa"
+```
+
+
+```{r echo = FALSE}
+# Plotting by continent:
+ggplot(footy) + 
+  geom_bar(aes(x = Continent, fill = Continent), color = "black") + 
+  labs(title = "Distribution of Nationalities by Continent in the Premier League", 
+       x = "Continent", 
+       y = "Count") +
+  scale_fill_brewer(palette="Spectral")
+```
+
+
+```{r echo = FALSE}
+# Looking closer at the European nations
+
+# Subset footy; keep only players from Europe
+europe = filter(footy, Continent == "Europe")
+
+# Categorising all European nations w less than
+# a 4% representation in the PL as "other"
+ptable = prop.table(table(europe$Nation))
+below4 = names(ptable[ptable < 0.04])
+europe$Nation[europe$Nation %in% below4] = "Other"
+
+# Plot European subset
+ggplot(europe) + 
+  geom_bar(aes(x = Nation), 
+           fill = c("white", "firebrick", "darkblue", "gray21", "hotpink4", "deepskyblue4"), 
+           color = "black") + 
+  labs(title = "Distribution of European Nationalities in the Premier League", 
+       x = "Country", 
+       y = "Count")
+```
+
+
+### **3. Distribution of Goals Scored in the Premier League**
+
+```{r echo = FALSE}
+footy %>%
+  filter(Position != "GK") %>%
+  ggplot() + 
+  geom_histogram(aes(x = Goals), bins = 10) + 
+  labs(title = "Distribution of Goals Scored", 
+       x = "Number of Goals", 
+       y = "Count") + 
+  geom_vline(aes(xintercept = mean(Goals, na.rm = T)), color = "red", linetype = "dashed") + 
+  geom_vline(aes(xintercept = median(Goals, na.rm = T)), color = "blue", linetype = "dashed")
+```
+
+```{r echo = FALSE}
+# Statistics for the Goals variable: 
+stats("Number of Goals", footy$Goals)
+```
+
+We can see from the above histogram that a vast majority of PL players have not scored any goals. We can examine this plot a bit more closely by grouping it by position, because forwards tend to be the primary goalscorers, while defenders and midfielders contribute to other aspects of the game. Hence, we can expect to see that defenders skew the data towards lower values, while forwards skew the plot towards higher values. 
+
+```{r echo = FALSE}
+footy %>%
+  filter(Position != "GK") %>%
+  ggplot() + 
+  geom_histogram(aes(x = Goals, fill = Position), bins = 10, alpha = 0.6) + 
+  labs(title = "Distribution of Goals Scored by Position", 
+       x = "Number of Goals", 
+       y = "Count") + 
+  geom_vline(aes(xintercept = mean(Goals, na.rm = T)), color = "red", linetype = "dashed") + 
+  geom_vline(aes(xintercept = median(Goals, na.rm = T)), color = "blue", linetype = "dashed")
+```
+
+From this histogram, we can see that our hypothesis is verified in that the highest number of goals tend to be scored by forwards.
+
+
+### **4. Distribution of Annual Player Wages**
+
+```{r echo = FALSE}
+footy$AnnualWages = footy$AnnualWages / 1000000
+footy$WeeklyWages = footy$WeeklyWages / 1000000
+
+ggplot(footy) + 
+  geom_histogram(aes(x = AnnualWages), bins = 25) + 
+  labs(title = "Distribution of Annual Player Wages",
+       x = "Annual Salary in Millions of Pounds", 
+       y = "Count") + 
+  geom_vline(aes(xintercept = mean(AnnualWages, na.rm = T)), color = "red", linetype = "dashed") + 
+  geom_vline(aes(xintercept = median(AnnualWages, na.rm = T)), color = "blue", linetype = "dashed")
+```
+
+```{r echo = FALSE}
+# Statistics for the AnnualWages variable: 
+stats("Annual Salary", footy$AnnualWages)
+```
+
+### **5. Distribution of FPL Prices**
+
+```{r echo = FALSE}
+# FPL Prices for all positions
+ggplot(footy) + 
+  geom_histogram(aes(x = FPLPrice), bins = 25) + 
+  labs(title = "Distribution of Player FPL Prices", x = "FPL Price", y = "Count") + 
+  geom_vline(aes(xintercept = mean(FPLPrice, na.rm = T)), color = "red", linetype = "dashed") + 
+  geom_vline(aes(xintercept = median(FPLPrice, na.rm = T)), color = "blue", linetype = "dashed")
+```
+
+```{r echo = FALSE}
+stats("FPL Price", footy$FPLPrice)
+```
+
+The above histogram displays the distribution of FPL prices for all players in the dataset. We can see that the plot is strongly skewed to the left towards lower FPL prices, and also that there is a large difference between minimum and maximum prices. We can look at FPL prices a bit more closely by examining each position individually, because forwards tend to be more expensive than defenders. 
+
+
+```{r echo = FALSE}
+for (pos in unique(footy$Position)) {
+  subset = footy[footy$Position == pos,]
+  mean = round(mean(subset$FPLPrice, na.rm = T), 3)
+  median = round(median(subset$FPLPrice, na.rm = T), 3)
+  
+  plot = ggplot(subset) + 
+    geom_histogram(aes(x = FPLPrice), bins = 25) + 
+    labs(title = paste("Distribution of FPL Prices for ", pos, " Position", sep = ""), 
+         x = "FPL Price", 
+         y = "Count") + 
+    geom_vline(aes(xintercept = mean), color = "red", linetype = "dashed") + 
+    geom_vline(aes(xintercept = median), color = "blue", linetype = "dashed") + 
+    xlim(c(4, 13)) +
+    geom_label(label= paste("Mean: ", mean, "\n", "Median: ", median, sep = ""), 
+    x = 12,
+    y = 7.5,
+    label.padding = unit(0.55, "lines"),
+    label.size = 0.35,
+    color = "black",
+    fill = "#69b3a2")
+  
+  print(plot)
+}
+```
+
+According to the plots above, forwards are the most valuable class of players in FPL, while defenders are the least valuable. This is because the role of forwards is to score goals, and each goal provides large amounts of points in FPL. Hence, forwards provide greater value to an FPL team. 
+
+
+## **Multivariate Analyses**
+
+
+### **1. Relationship between Age and Minutes Played**
+
+```{r echo = FALSE}
+ggplot(footy) + 
+  geom_point(aes(x = Age, y = TotalMinutes), colour = "ivory4") + 
+  labs(title = "Scatterplot of Age vs Total Minutes Played", 
+       x = "Age in years", 
+       y = "Total Minutes Played")
+```
+
+The above scatterplot appears to have little to no trend, and this is verified by the low correlation coefficient, `r cor(footy$Age, footy$TotalMinutes)`. This may suggest that age isn't actually a huge factor in the total minutes played, because while older players may have more professional experience, younger players have an advantage in that they are nimbler and more energetic. Hence, it makes sense that older and younger players tend to play a similar amount of minutes. 
+
+
+### **2. Relationship between Goals Scored and Annual Wage**
+
+```{r echo = FALSE}
+for (pos in c("FW", "MF")) {
+  subset = footy[footy$Position == pos,]
+  
+  plot = ggplot(subset, aes(x = Goals, y = AnnualWages)) + 
+    geom_point(colour = "mediumseagreen") + 
+    geom_label_repel(data = subset(subset, AnnualWages > 20 | Goals >= 10), 
+                  aes(label = Player),
+                  box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') +
+    labs(title = paste("Goals Scored vs Annual Wages for", pos, "Position"), 
+         x = "Goals Scored", 
+         y = "Annual Wages in Pounds")
+  
+  print(plot)
+  
+  cat("Correlation coefficient for", pos, ":", cor(subset$Goals, subset$AnnualWages, use = "complete.obs"), "\n")
+}
+```
+
+Above, we have generated two plots; one for the forwards and the other for midfielders. Goalkeepers and defenders have been filtered out, because they score few (if any) goals at all, and hence investigating them would be generally pointless. Players who have scored at least 10 goals or are paid over 20 million a year are labelled. 
+
+We can see from the two scatterplots that the relationship between goals and wages is much more explicit in the plot for forwards than it is for midfielders. This is possibly because the number of goals scored is one of the main measures of "quality" for a forward, whereas the main aim of midfielders is not so much to score goals, but rather to progress the ball forward. As a result, it makes sense that forwards who score more and are regarded as "better" tend to earn higher salaries.
+
+Despite these generalisations, there are certain players who do not fit the general trend. For example, in the plot for forwards, Cristiano Ronaldo stands out as a high-earning player who has scored few goals. This is likely due to the fact that he is a global superstar who has high wage demands, although he has played few minutes this season and hence has scored fewer goals. Removing him from the plot would likely increase the correlation coefficient. In the midfielders plot, it can be seen that Kevin De Bruyne is paid over 20 million annually despite having scored just 3 goals. This can be explained by the fact that midfielders are mainly playmakers rather than goalscorers, and De Bruyne is an exceptional playmaker who contributes greatly to his club's goalscoring prospects.
+
+The general trends in both graphs, however, is fairly minimal, and so it cannot really be said that goals is a predictor of wages. 
+
+
+### **3. Relationship between Expected Goals and Actual Goals Scored**
+
+The below plots will attempt to look at whether players tended to over- or underachieve their expected goals (xG), which is a measure that indicates how well a player should be performing based on the context of their goalscoring opportunities. If a player's xG is identical to their actual number of goals scored, then the player is performing as expected. When the actual goals scored is less than xG, this suggests that the given player is underachieving, and the player is said to be overachieving when their actual goals is greater than their xG. 
+
+As before, goalkeepers and defenders are filtered out, because they typically do not score goals. 
+
+
+```{r echo = FALSE}
+for (pos in c("FW", "MF")) {
+  subset = footy[footy$Position == pos,]
+  
+  plot = ggplot(subset, aes(x = xG, y = Goals)) + 
+    geom_point() + 
+    labs(title = paste("Expected Goals (xG) vs Actual Goals Scored by", pos, "Position"), 
+         x = "Expected Goals", 
+         y = "Actual Goals Scored") + 
+    geom_label_repel(data = subset(subset, Goals > xG + 2), 
+                  aes(label = Player),
+                  box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50') + 
+    geom_abline()
+  
+  print(plot)
+  
+  cat("Correlation coefficient for", pos, ":", cor(subset$xG, subset$Goals, use = "complete.obs"), "\n")
+}
+```
+
+The above two scatterplots, combined with their corresponding correlation coefficient, demonstrate that, as expected, xG is strongly positively correlated with goals scored. The line $y = x$ was drawn in each plot to represent where xG is exactly equal to actual goals scored. Hence, any point above the line represents a player who is overachieving their xG, and it is the opposite for points under the line. 
+
+Players who are overachieving their xG by over 2 goals have been labelled. The most notable of these players is Erling Haaland, a young and extremely talented player who has capitalised on each of his goalscoring opportunities. 
+
+
+### **4. Annual Wages by Club**
+
+In most European football leagues, there are a select number of clubs who dominate the league in talent, wealth, and success. In the Premier League, these are the "Big Six" clubs, who namely are Arsenal, Manchester City, Manchester United, Tottenham Hotspur, Chelsea, and Liverpool. We should expect that, due to these clubs having more big-name players and more money, they will likely pay their players more annual wages. 
+
+
+```{r echo = FALSE}
+wageTable = footy %>% 
+  group_by(Club) %>%
+  summarise(mean(AnnualWages, na.rm = T)) %>%
+  rename(AverageAnnualWage = 2)
+
+ggplot(wageTable) + 
+  geom_bar(aes(x = reorder(Club, AverageAnnualWage), y = AverageAnnualWage), stat = "identity") +
+  labs(title = "Average Annual Wages paid to Players by Club", x = "Club", y = "Average Annual Salary in Millions of Pounds") + 
+  coord_flip()
+```
+
+As can be seen above, the "Big Six" clubs, on average, pay their players the highest annual wage. In particular, the salaries paid by the two Manchester clubs tower over all the others, approaching nearly 10 million a year. 
+
+
+### **Total Minutes vs FPL Price**
+
+```{r echo = FALSE}
+ggplot(footy) + 
+  geom_point(aes(x = TotalMinutes, y = FPLPoints)) + 
+  labs(title = "Relationship between Total Minutes Played and FPL Points", 
+       x = "Minutes Played", 
+       y = "FPL Points Scored") + 
+  facet_wrap(~Position)
+```
+```{r echo = FALSE}
+footy %>% 
+  group_by(Position) %>%
+  summarise(cor(TotalMinutes, FPLPoints, use = "complete.obs")) %>%
+  rename("CorrelationCoefficient" = 2) %>%
+  arrange(desc(CorrelationCoefficient))
+```
+
+The scatterplot above displays that minutes played and FPL points are very highly correlated, which makes sense, because players gain FPL points for playing over 60 minutes in a game. Additionally, the more minutes played, the more likely a player is to score or assist goals, which provides large amounts of points.
+
+By looking at the correlation coefficient for each position, we can notice that while the values for midfielders, defenders, and forwards are extremely similar, the value for goalkeepers is a fairly significant amount higher. This can be explained by the fact that goalkeepers are typically not given as much opportunity to score FPL points, with their main role being to prevent opposition goals.
+
+
+## **Choice Elements**
+
+In this investigation, I involved choice elements: 
+
+A. Merge one or more datasets
+D. Manage NA values
+F. Format or parse at least one string variable
+G. Web scrape at least one variable using code
+H. Use a for loop to either process the data or carry out some analysis.
+J. Write and use a user-written function with at least 2 arguments to either process the data or carry out some analysis.
+
+I was able to merge (left join) wage and FPL data with the main player statistics dataset. NA values were managed in several ways - when calculating statistics, the arguments na.rm = T and use = "complete.obs" were used. Additionally, NA values were automatically not plotted in the univariate and multivariate plots. Several string variables (Nation, Position, and Club) had to be reformatted, since they originally contained extra content that I did not require for my investigation. The FPL dataset was scraped from online using the packages RSelenium, tidyverse, rvest, data.table, and netstat. A function with two arguments was written to facilitate printing and formatting statsitics for histograms. 
+
+
+## **Reproducibility**
+
+The GitHub repository for this project can be accessed via [this](https://github.com/jasminex21/SDS313_Project2) link. The contents of the repository are as follows: 
+
+- prem_player_stats.csv: player statistics dataset
+- pl_player_wages.csv: wages dataset
+- kane+sonny!.jpg: image in introduction
+- fpl_table_GW14.csv: web-scraped FPL dataset
+- FPL_web_scraping_code.R: the code used to scrape the FPL dataset
+- Project2.Rmd: this code 
+
+Both the player statistics and wage datasets are included in the repository. The web-scraped FPL dataset, as well as the code used to scrape it, are included as well. 
+
+## **References**
+
+Player statistics dataset: https://fbref.com/en/comps/9/stats/Premier-League-Stats
+
+Wages dataset: https://fbref.com/en/comps/9/wages/Premier-League-Wages
+
+FPL Price and Points dataset: https://fantasy.premierleague.com/player-list
